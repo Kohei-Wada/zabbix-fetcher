@@ -25,3 +25,9 @@
  ```
  python -m unittest discover
  ```
+
+ Alternatively, if you have uv installed, you can run tests in a reproducible environment:
+
+ ```
+ uv run python -m unittest discover
+ ```
