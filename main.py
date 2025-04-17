@@ -1,98 +1,41 @@
-import os
 import time
-import requests
-from pyzabbix import ZabbixAPI
 
-ZABBIX_URL = os.getenv("ZABBIX_URL")
-ZABBIX_USER = os.getenv("ZABBIX_USER")
-ZABBIX_PASS = os.getenv("ZABBIX_PASS")
-API_ENDPOINT = os.getenv("API_ENDPOINT", "http://localhost:8000")
-
-GROUP_FILTER = [g.strip() for g in os.getenv(
-    "ZABBIX_GROUPS", "").split(",") if g.strip()]
-IGNORE_HOSTS = [h.strip() for h in os.getenv(
-    "IGNORE_HOSTS", "").split(",") if h.strip()]
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", 3600))
+from zabbix_fetcher import Config, ZabbixClient, HostSyncer
 
 
-def fetch_and_send_hosts():
+def main():
+    config = Config()
     try:
-        zapi = ZabbixAPI(ZABBIX_URL)
-        zapi.login(ZABBIX_USER, ZABBIX_PASS)
+        client = ZabbixClient(config)
     except Exception as e:
-        print(f"Error connecting to Zabbix API: {e}")
+        print(f"Failed to initialize Zabbix client: {e}")
         return
+    syncer = HostSyncer(config)
 
-    group_ids = []
-    if GROUP_FILTER:
+    while True:
         try:
-            all_groups = zapi.hostgroup.get(output=["groupid", "name"])
-            group_map = {g["name"]: g["groupid"] for g in all_groups}
-            group_ids = [group_map[g] for g in GROUP_FILTER if g in group_map]
+            group_ids = client.get_group_ids()
+            hosts = client.get_hosts(group_ids)
+            proxy_map = client.get_proxy_map()
+            payload = syncer.build_payload(hosts, proxy_map)
+
+            if not payload:
+                print("No valid hosts to send.")
+            else:
+                res = syncer.send(payload)
+                if res and res.status_code == 200:
+                    print(f"Successfully synced {len(payload)} hosts to API")
+                else:
+                    status = res.status_code if res else "N/A"
+                    text = res.text if res else ""
+                    print(f"API error: {status} - {text}")
         except Exception as e:
-            print(f"Error fetching Zabbix groups: {e}")
-            return
+            print(f"Error during sync: {e}")
 
-    host_filter = {"groupids": group_ids} if group_ids else {}
-
-    try:
-        hosts = zapi.host.get(
-            output=["hostid", "host", "name", "proxy_hostid"],
-            selectInterfaces=["interfaceid", "ip", "port"],
-            **host_filter
-        )
-    except Exception as e:
-        print(f"Error fetching Zabbix hosts: {e}")
-        return
-
-    try:
-        proxies = zapi.proxy.get(output=["proxyid", "host"])
-        proxy_map = {p["proxyid"]: p["host"] for p in proxies}
-    except Exception as e:
-        print(f"Error fetching Zabbix proxies: {e}")
-        return
-
-    payload = []
-
-    for h in hosts:
-        if h["name"] in IGNORE_HOSTS:
-            continue
-
-        ip = h["interfaces"][0]["ip"] if h["interfaces"] else None
-        port = h["interfaces"][0]["port"] if h["interfaces"] else None
-        proxy_id = h.get("proxy_hostid")
-        proxy_name = proxy_map.get(proxy_id)
-
-        if not ip or not port:
-            continue
-
-        payload.append({
-            "zabbix_url": ZABBIX_URL,
-            "hostid": h["hostid"],
-            "host": h["host"],
-            "name": h["name"],
-            "ip": ip,
-            "maintenance_port": port,
-            "proxy_name": proxy_name
-        })
-
-    if not payload:
-        print("No valid hosts to send.")
-        return
-
-    try:
-        res = requests.post(API_ENDPOINT, json=payload)
-        if res.status_code == 200:
-            print(f"Successfully synced {len(payload)} hosts to API")
-        else:
-            print(f"API error: {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"Request failed: {e}")
+        print(f"Sleeping for {config.fetch_interval} seconds...")
+        time.sleep(config.fetch_interval)
 
 
 if __name__ == "__main__":
-    while True:
-        fetch_and_send_hosts()
-        print(f"Sleeping for {FETCH_INTERVAL} seconds...")
-        time.sleep(FETCH_INTERVAL)
+    main()
 
